@@ -1,13 +1,14 @@
-from typing import Optional, Tuple
-
-import diffusion_policy.model.bet.latent_generators.latent_generator as latent_generator
-import diffusion_policy.model.bet.libraries.mingpt.model as mingpt_model
-import diffusion_policy.model.bet.libraries.mingpt.trainer as mingpt_trainer
-import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import einops
+import diffusion_policy.model.bet.latent_generators.latent_generator as latent_generator
+
+import diffusion_policy.model.bet.libraries.mingpt.model as mingpt_model
+import diffusion_policy.model.bet.libraries.mingpt.trainer as mingpt_trainer
 from diffusion_policy.model.bet.libraries.loss_fn import FocalLoss, soft_cross_entropy
+
+from typing import Optional, Tuple
 
 
 class MinGPT(latent_generator.AbstractLatentGenerator):
@@ -49,7 +50,9 @@ class MinGPT(latent_generator.AbstractLatentGenerator):
 
         gpt_config = mingpt_model.GPTConfig(
             input_size=self.input_size,
-            vocab_size=(self.vocab_size * (1 + self.action_dim) if self.predict_offsets else self.vocab_size),
+            vocab_size=self.vocab_size * (1 + self.action_dim)
+            if self.predict_offsets
+            else self.vocab_size,
             block_size=self.block_size,
             n_layer=n_layer,
             n_head=n_head,
@@ -79,7 +82,9 @@ class MinGPT(latent_generator.AbstractLatentGenerator):
         # We can just use the observation as the input and the next latent as the target.
         if self.predict_offsets:
             target_latents, target_offsets = target_latents
-        is_soft_target = (target_latents.shape[-1] == self.vocab_size) and (self.vocab_size != 1)
+        is_soft_target = (target_latents.shape[-1] == self.vocab_size) and (
+            self.vocab_size != 1
+        )
         if is_soft_target:
             target_latents = target_latents.view(-1, target_latents.size(-1))
             criterion = soft_cross_entropy
@@ -107,7 +112,9 @@ class MinGPT(latent_generator.AbstractLatentGenerator):
             # if soft targets, argmax is considered the target class
             selected_offsets = offsets[
                 torch.arange(offsets.size(0)),
-                (target_latents.argmax(dim=-1).view(-1) if is_soft_target else target_latents.view(-1)),
+                target_latents.argmax(dim=-1).view(-1)
+                if is_soft_target
+                else target_latents.view(-1),
             ]
             offset_loss = self.offset_loss_scale * F.mse_loss(
                 selected_offsets, target_offsets.view(-1, self.action_dim)
@@ -139,7 +146,9 @@ class MinGPT(latent_generator.AbstractLatentGenerator):
             else:
                 return logits, loss
 
-    def generate_latents(self, obs_rep: torch.Tensor) -> torch.Tensor:
+    def generate_latents(
+        self, obs_rep: torch.Tensor
+    ) -> torch.Tensor:
         batch, seq, embed = obs_rep.shape
 
         output, _ = self.model(obs_rep, None)
@@ -158,11 +167,13 @@ class MinGPT(latent_generator.AbstractLatentGenerator):
         batch, seq, choices = probs.shape
         # Sample from the multinomial distribution, one per row.
         sampled_data = torch.multinomial(probs.view(-1, choices), num_samples=1)
-        sampled_data = einops.rearrange(sampled_data, "(batch seq) 1 -> batch seq 1", batch=batch, seq=seq)
+        sampled_data = einops.rearrange(
+            sampled_data, "(batch seq) 1 -> batch seq 1", batch=batch, seq=seq
+        )
         if self.predict_offsets:
-            sampled_offsets = offsets[torch.arange(offsets.shape[0]), sampled_data.flatten()].view(
-                batch, seq, self.action_dim
-            )
+            sampled_offsets = offsets[
+                torch.arange(offsets.shape[0]), sampled_data.flatten()
+            ].view(batch, seq, self.action_dim)
 
             return (sampled_data, sampled_offsets)
         else:
@@ -171,5 +182,7 @@ class MinGPT(latent_generator.AbstractLatentGenerator):
     def get_optimizer(
         self, weight_decay: float, learning_rate: float, betas: Tuple[float, float]
     ) -> torch.optim.Optimizer:
-        trainer_cfg = mingpt_trainer.TrainerConfig(weight_decay=weight_decay, learning_rate=learning_rate, betas=betas)
+        trainer_cfg = mingpt_trainer.TrainerConfig(
+            weight_decay=weight_decay, learning_rate=learning_rate, betas=betas
+        )
         return self.model.configure_optimizers(trainer_cfg)

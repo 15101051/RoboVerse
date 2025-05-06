@@ -1,9 +1,9 @@
 from typing import Optional, Sequence
 
 import torch
-from torch import Tensor, nn
+from torch import Tensor
+from torch import nn
 from torch.nn import functional as F
-
 
 # Reference: https://github.com/pytorch/pytorch/issues/11959
 def soft_cross_entropy(
@@ -84,7 +84,9 @@ class FocalLoss(nn.Module):
         self.ignore_index = ignore_index
         self.reduction = reduction
 
-        self.nll_loss = nn.NLLLoss(weight=alpha, reduction="none", ignore_index=ignore_index)
+        self.nll_loss = nn.NLLLoss(
+            weight=alpha, reduction="none", ignore_index=ignore_index
+        )
 
     def __repr__(self):
         arg_keys = ["alpha", "gamma", "ignore_index", "reduction"]
@@ -160,5 +162,7 @@ def focal_loss(
             alpha = torch.tensor(alpha)
         alpha = alpha.to(device=device, dtype=dtype)
 
-    fl = FocalLoss(alpha=alpha, gamma=gamma, reduction=reduction, ignore_index=ignore_index)
+    fl = FocalLoss(
+        alpha=alpha, gamma=gamma, reduction=reduction, ignore_index=ignore_index
+    )
     return fl

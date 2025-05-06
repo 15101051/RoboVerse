@@ -1,7 +1,6 @@
 import torch
 import torchvision
 
-
 def get_resnet(name, weights=None, **kwargs):
     """
     name: resnet18, resnet34, resnet50
@@ -14,23 +13,16 @@ def get_resnet(name, weights=None, **kwargs):
     func = getattr(torchvision.models, name)
     resnet = func(weights=weights, **kwargs)
     resnet.fc = torch.nn.Identity()
-    # resnet_new = torch.nn.Sequential(
-    #     resnet,
-    #     torch.nn.Linear(512, 128)
-    # )
-    # return resnet_new
     return resnet
-
 
 def get_r3m(name, **kwargs):
     """
     name: resnet18, resnet34, resnet50
     """
     import r3m
-
-    r3m.device = "cpu"
+    r3m.device = 'cpu'
     model = r3m.load_r3m(name)
     r3m_model = model.module
     resnet_model = r3m_model.convnet
-    resnet_model = resnet_model.to("cpu")
+    resnet_model = resnet_model.to('cpu')
     return resnet_model
