@@ -83,6 +83,7 @@ class DiffusionUnetTimmPolicy(BaseImagePolicy):
             local_cond=None,
             global_cond=None,
             generator=None,
+            real_actions=None,
             # keyword arguments to scheduler.step
             **kwargs
         ):
@@ -94,32 +95,36 @@ class DiffusionUnetTimmPolicy(BaseImagePolicy):
             dtype=condition_data.dtype,
             device=condition_data.device,
             generator=generator)
+        
+        dis_all = (real_actions - trajectory).abs().mean(dim=(1, 2))
     
         # set step values
         scheduler.set_timesteps(self.num_inference_steps)
+
+        dis_norm_all = None
 
         for t in scheduler.timesteps:
             # 1. apply conditioning
             trajectory[condition_mask] = condition_data[condition_mask]
 
             # 2. predict model output
-            model_output = model(trajectory, t, 
-                local_cond=local_cond, global_cond=global_cond)
+            model_output = model(trajectory, t, local_cond=local_cond, global_cond=global_cond)
 
             # 3. compute previous image: x_t -> x_t-1
-            trajectory = scheduler.step(
-                model_output, t, trajectory, 
-                generator=generator,
-                **kwargs
-                ).prev_sample
+            new_trajectory = scheduler.step(model_output, t, trajectory, generator=generator, **kwargs).prev_sample
+            
+            if t == 45:
+                assert torch.all(~condition_mask)
+                dis_norm_all = (trajectory - new_trajectory).abs().mean(dim=(1, 2)) / dis_all
+                rem_norm_all = (real_actions - new_trajectory).abs().mean(dim=(1, 2)) / dis_all
         
         # finally make sure conditioning is enforced
         trajectory[condition_mask] = condition_data[condition_mask]        
 
-        return trajectory
+        return trajectory, dis_norm_all, rem_norm_all
 
 
-    def predict_action(self, obs_dict: Dict[str, torch.Tensor], fixed_action_prefix: torch.Tensor=None, obs_timestamps=None) -> Dict[str, torch.Tensor]:
+    def predict_action(self, obs_dict: Dict[str, torch.Tensor], fixed_action_prefix: torch.Tensor=None, real_actions=None) -> Dict[str, torch.Tensor]:
         """
         obs_dict: must include "obs" key
         fixed_action_prefix: unnormalized action prefix
@@ -143,14 +148,45 @@ class DiffusionUnetTimmPolicy(BaseImagePolicy):
             cond_mask[:, :n_fixed_steps] = True
             cond_data = self.normalizer['action'].normalize(cond_data)
 
+        real_actions = self.normalizer['action'].normalize(real_actions)
 
         # run sampling
-        nsample = self.conditional_sample(
+        nsample, dis_norm_all, rem_norm_all = self.conditional_sample(
             condition_data=cond_data, 
             condition_mask=cond_mask,
             local_cond=None,
             global_cond=global_cond,
+            real_actions=real_actions,
             **self.kwargs)
+        
+        N = 16
+        dis_norm_alls, rem_norm_alls, trajectories = [dis_norm_all], [rem_norm_all], [nsample]
+        for _ in range(N - 1):
+            trajectory, dis_norm_all, rem_norm_all = self.conditional_sample(
+                condition_data=cond_data, 
+                condition_mask=cond_mask,
+                local_cond=None,
+                global_cond=global_cond,
+                real_actions=real_actions,
+                **self.kwargs)
+            dis_norm_alls.append(dis_norm_all)
+            rem_norm_alls.append(rem_norm_all)
+            trajectories.append(trajectory)
+        
+        def agg_mean(xs):
+            return torch.mean(torch.stack(xs), dim=0)
+
+        def agg_var(xs):
+            # xs: N * [B, D]
+            v = torch.var(torch.stack(xs), dim=0)  # [B, D]
+            return torch.sum(v, dim=1)
+
+        # trajectories: N * [B, H, D]
+        print(trajectories)
+        print('----------------------')
+        traj_var = agg_var([traj.flatten(1, 2) for traj in trajectories])
+        dis_norm_all = agg_mean(dis_norm_alls)
+        rem_norm_all = agg_mean(rem_norm_alls)
         
         # unnormalize prediction
         assert nsample.shape == (B, self.action_horizon, self.action_dim)
@@ -160,7 +196,8 @@ class DiffusionUnetTimmPolicy(BaseImagePolicy):
             'action': action_pred,
             'action_pred': action_pred
         }
-        return result
+        action_err = (nsample - real_actions).abs().sum(dim=(1, 2))
+        return result, dis_norm_all, action_err, rem_norm_all, traj_var
 
     # ========= training  ============
     def set_normalizer(self, normalizer: LinearNormalizer):
@@ -225,68 +262,6 @@ class DiffusionUnetTimmPolicy(BaseImagePolicy):
         loss = loss.mean()
 
         return loss
-
-
-    def active_loss(self, batch):
-        # normalize input
-        assert 'valid_mask' not in batch
-        nobs = self.normalizer.normalize(batch['obs'])
-        nactions = self.normalizer['action'].normalize(batch['action'])
-        
-        assert self.obs_as_global_cond
-        global_cond = self.obs_encoder(nobs)
-        obs_feature = global_cond.clone()
-        # train on multiple diffusion samples per obs
-        if self.train_diffusion_n_samples != 1:
-            # repeat obs features and actions multiple times along the batch dimension
-            # each sample will later have a different noise sample, effecty training 
-            # more diffusion steps per each obs encoder forward pass
-            global_cond = torch.repeat_interleave(global_cond, 
-                repeats=self.train_diffusion_n_samples, dim=0)
-            nactions = torch.repeat_interleave(nactions, 
-                repeats=self.train_diffusion_n_samples, dim=0)
-
-        trajectory = nactions
-        # Sample noise that we'll add to the images
-        noise = torch.randn(trajectory.shape, device=trajectory.device)
-        # input perturbation by adding additonal noise to alleviate exposure bias
-        # reference: https://github.com/forever208/DDPM-IP
-        noise_new = noise + self.input_pertub * torch.randn(trajectory.shape, device=trajectory.device)
-
-        # Sample a random timestep for each image
-        timesteps = torch.randint(
-            0, self.noise_scheduler.config.num_train_timesteps, 
-            (nactions.shape[0],), device=trajectory.device
-        ).long()
-
-        # Add noise to the clean images according to the noise magnitude at each timestep
-        # (this is the forward diffusion process)
-        noisy_trajectory = self.noise_scheduler.add_noise(
-            trajectory, noise_new, timesteps)
-        
-        # Predict the noise residual
-        pred = self.model(
-            noisy_trajectory,
-            timesteps, 
-            local_cond=None,
-            global_cond=global_cond
-        )
-
-        pred_type = self.noise_scheduler.config.prediction_type 
-        if pred_type == 'epsilon':
-            target = noise
-        elif pred_type == 'sample':
-            target = trajectory
-        else:
-            raise ValueError(f"Unsupported prediction type {pred_type}")
-
-        loss = F.mse_loss(pred, target, reduction='none')
-        loss = loss.type(loss.dtype)
-        loss = reduce(loss, 'b ... -> b (...)', 'mean')
-        loss = loss.mean()
-
-        return loss, obs_feature
-
 
     def forward(self, batch):
         return self.compute_loss(batch)

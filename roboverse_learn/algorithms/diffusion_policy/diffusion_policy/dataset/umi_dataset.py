@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import zarr
 from threadpoolctl import threadpool_limits
-from tqdm import trange, tqdm
+from tqdm import tqdm
 from filelock import FileLock
 import shutil
 
@@ -22,7 +22,7 @@ from diffusion_policy.common.replay_buffer import ReplayBuffer
 from diffusion_policy.common.sampler import SequenceSampler, get_val_mask
 from diffusion_policy.dataset.base_dataset import BaseDataset
 from diffusion_policy.model.common.normalizer import LinearNormalizer
-from umi.common.pose_util import pose_to_mat, mat_to_pose10d
+from diffusion_policy.umi.common.pose_util import pose_to_mat, mat_to_pose10d
 
 register_codecs()
 
